@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import abc
 import dataclasses
+from typing import Any, Callable, Generic, Type, TypeVar
 
 _VERSION = 0
 
@@ -27,7 +29,6 @@ except ImportError:
     from pathlib import Path, PurePath
     from re import Pattern
     from types import GeneratorType
-    from typing import Any, Callable, Type
     from uuid import UUID
 
     def _pydantic_installed() -> bool:
@@ -87,13 +88,15 @@ except ImportError:
         from pydantic.networks import AnyUrl, NameEmail
         from pydantic.types import SecretBytes, SecretStr
 
-        ENCODERS_BY_TYPE.update({
-            Color: str,
-            NameEmail: str,
-            SecretBytes: str,
-            SecretStr: str,
-            AnyUrl: str,
-        })
+        ENCODERS_BY_TYPE.update(
+            {
+                Color: str,
+                NameEmail: str,
+                SecretBytes: str,
+                SecretStr: str,
+                AnyUrl: str,
+            }
+        )
         if _is_pydantic_2():
             from pydantic_core import Url
 
@@ -194,29 +197,98 @@ def _json_dumps(thing: object) -> str:
     )
 
 
-def disk_cache(dirpath: str = "~/.cache"):
-    def decorator(func):
+T = TypeVar("T")
+
+
+class Cache(Generic[T]):
+    @abc.abstractmethod
+    def init(self) -> None:
+        pass
+
+    @abc.abstractmethod
+    def get(self, key) -> T:
+        pass
+
+    @abc.abstractmethod
+    def set(self, key, result: T) -> None:
+        pass
+
+
+class PickleCache(Cache):
+    def __init__(self, basedir: str = "~/.cache"):
+        self.basedir = os.path.expanduser(basedir)
+
+    def init(self):
+        os.makedirs(self.basedir, exist_ok=True)
+
+    def get(self, key):
+        unique_hash = get_hash(key).hex()
+        cache_file = os.path.join(self.basedir, f"{unique_hash}.pickle")
+        if os.path.exists(cache_file):
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        return None
+
+    def set(self, key, data):
+        unique_hash = get_hash(key).hex()
+        cache_file = os.path.join(self.basedir, f"{unique_hash}.pickle")
+        with open(cache_file, "wb") as f:
+            pickle.dump(data, f)
+
+
+TFunc = TypeVar("TFunc", bound=Callable[..., Any])
+
+
+# def disk_cache(dirpath: str = "~/.cache") -> Callable[[TFunc], TFunc]:
+#     def decorator(func: TFunc) -> TFunc:
+#         @wraps(func)
+#         def wrapper(*args, **kwargs):
+#             cache_dir = os.path.expanduser(dirpath)
+#             os.makedirs(cache_dir, exist_ok=True)
+#
+#             unique_hash = get_hash((args, kwargs)).hex()
+#             cache_file = os.path.join(cache_dir, f"{unique_hash}.pickle")
+#
+#             if os.path.exists(cache_file):
+#                 get_console().print(f"💾✅ Loading cached result from {cache_file}")
+#                 with open(cache_file, "rb") as f:
+#                     return pickle.load(f)
+#
+#             get_console().print(f"💾🔍 Calculating result for {cache_file}")
+#             result = func(*args, **kwargs)
+#
+#             with open(cache_file, "wb") as f:
+#                 pickle.dump(result, f)
+#
+#             return result
+#
+#         return wrapper
+#
+#     return decorator
+
+
+def cache(cache_or_cache_init_param: Cache | Any, cache_cls: type[Cache] = None) -> Callable[[TFunc], TFunc]:
+    def decorator(func: TFunc) -> TFunc:
         @wraps(func)
         def wrapper(*args, **kwargs):
-            cache_dir = os.path.expanduser(dirpath)
-            os.makedirs(cache_dir, exist_ok=True)
+            if cache_cls:
+                cache = cache_cls(cache_or_cache_init_param)
+            else:
+                cache = cache_or_cache_init_param
+            cache.init()
 
-            unique_filename = get_hash((args, kwargs)).hex()
-            cache_file = os.path.join(cache_dir, f"{unique_filename}.pickle")
-
-            if os.path.exists(cache_file):
-                get_console().print(f"💾✅ Loading cached result from {cache_file}")
-                with open(cache_file, "rb") as f:
-                    return pickle.load(f)
-
-            get_console().print(f"💾🔍 Calculating result for {cache_file}")
+            value = cache.get((args, kwargs))
+            if value is not None:
+                return value
             result = func(*args, **kwargs)
-
-            with open(cache_file, "wb") as f:
-                pickle.dump(result, f)
-
+            cache.set((args, kwargs), result)
             return result
 
         return wrapper
 
     return decorator
+
+
+def disk_cache(pickle_cache: PickleCache | Path | str) -> Callable[[TFunc], TFunc]:
+    cache_cls = None if isinstance(pickle_cache, PickleCache) else PickleCache
+    return cache(pickle_cache, cache_cls)
