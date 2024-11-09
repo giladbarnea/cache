@@ -1,4 +1,14 @@
 # Better take this from to/to.py
+from collections.abc import Callable
+from pathlib import Path
+from typing import Generic, TypeVar, Union
+
+from ruamel.yaml import YAML
+
+from cache import hash
+from cache.serialize import jsonable_encoder
+
+
 def yaml_str_representer(dumper, data):
     if len(data.splitlines()) > 1:  # check for multiline string
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
@@ -22,7 +32,7 @@ YAML_LOADS_CACHE = {}
 def yaml_loads(data: str, *, cache=False) -> dict:
     if not cache:
         return yaml.load(data)
-    data_hash = get_hash(data).hex()
+    data_hash = hash.get_hash(data).hex()
     if data_hash in YAML_LOADS_CACHE:
         return YAML_LOADS_CACHE[data_hash]
     YAML_LOADS_CACHE[data_hash] = yaml.load(data)
@@ -47,7 +57,7 @@ def yaml_dumps(data: dict) -> str:
     return output.getvalue()
 
 
-def init_yaml_cache_file(path) -> Path:
+def _init_yaml_cache_file(path) -> Path:
     cache_path = Path(path)
     cache_path.touch(exist_ok=True)
     if not cache_path.read_text():
@@ -56,32 +66,28 @@ def init_yaml_cache_file(path) -> Path:
 
 
 T = TypeVar("T")
+
+
 class SimpleYamlCache(Generic[T]):
     def __init__(
-            self, path: Path, parse_func: Callable[[dict], T], to_dict_func: Callable[[T], dict] = jsonable_encoder
+        self,
+        path: Path,
+        parse_func: Callable[[dict], T],
+        to_dict_func: Callable[[T], dict] = jsonable_encoder,
     ):
-        self.path = init_yaml_cache_file(path)
+        self.path = _init_yaml_cache_file(path)
         self.parse_func = parse_func
         self.to_dict_func = to_dict_func
         self._nickname = path.stem.upper().replace("_", " ").replace("-", " ")
 
     def get(self, key: str) -> Union[T, None]:
-        cache = yaml_loads(self.path.read_text())
+        cache: dict = yaml_loads(self.path.read_text())
         if key in cache:
-            console.rule(
-                f"Found cached {self._nickname} for {key!r} out of {len(cache)} cached entries",
-                style="bold bright green",
-            )
             return self.parse_func(cache[key])
-        console.rule(f"No cached {self._nickname} for {key!r}. Cache count: {len(cache)}", style="bold bright cyan")
         return None
 
-    def set(self, key: str, value: T):
+    def set(self, key: str, value: T) -> None:
         cache = yaml_loads(self.path.read_text())
-        count_before = len(cache)
         data = self.to_dict_func(value)
         cache[key] = data
-        console.rule(
-            f"Cached {self._nickname} for {key!r}. Cache count: {count_before}->{len(cache)}", style="bold bright blue"
-        )
         yaml_dump(cache, self.path)
